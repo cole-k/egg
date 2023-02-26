@@ -138,7 +138,14 @@ fn rules() -> Vec<Rewrite<Lambda, LambdaAnalysis>> {
         rw!("eq-comm";   "(= ?a ?b)"        => "(= ?b ?a)"),
         // subst rules
         rw!("fix";      "(fix ?v ?e)"             => "(let ?v (fix ?v ?e) ?e)"),
-        rw!("beta";     "(app (lam ?v ?body) ?e)" => "(let ?v ?e ?body)"),
+        // rw!("beta";     "(app (lam ?v ?body) ?e)" => "(let ?v ?e ?body)"),
+        rw!("beta";     "(app (lam ?v ?body) ?e)" => {
+            { CallByName {
+                v: var("?v"),
+                e: var("?e"),
+                body: var("?body"),
+            }}
+        }),
         rw!("let-app";  "(let ?v ?e (app ?a ?b))" => "(app (let ?v ?e ?a) (let ?v ?e ?b))"),
         rw!("let-add";  "(let ?v ?e (+   ?a ?b))" => "(+   (let ?v ?e ?a) (let ?v ?e ?b))"),
         rw!("let-eq";   "(let ?v ?e (=   ?a ?b))" => "(=   (let ?v ?e ?a) (let ?v ?e ?b))"),
@@ -161,6 +168,102 @@ fn rules() -> Vec<Rewrite<Lambda, LambdaAnalysis>> {
             }}
             if is_not_same_var(var("?v1"), var("?v2"))),
     ]
+}
+
+struct CallByName {
+    v: Var,
+    e: Var,
+    body: Var,
+}
+
+impl CallByName {
+    fn substitute(
+        &self,
+        egraph: &mut EGraph,
+        target_eclass: Id,
+        subst: &Subst,
+    ) -> Vec<Id> {
+        let v = subst[self.v];
+        let e = subst[self.e];
+        let eclass_id = egraph[target_eclass].id;
+        // No substitution to make
+        if !egraph[target_eclass].data.free.contains(&v) {
+            return vec!()
+        }
+        let mut new_ids = vec!();
+        for lambda_term in egraph[target_eclass].nodes.clone() {
+            let mut ids = match lambda_term {
+                Lambda::App([e1, e2]) => {
+                    let subst_e1s = self.substitute(egraph, e1, subst);
+                    let subst_e2s = self.substitute(egraph, e2, subst);
+                    product(&subst_e1s, &subst_e2s)
+                        .map(|(e1, e2)| egraph.add(Lambda::App([*e1, *e2])))
+                        .collect()
+                }
+                Lambda::Lambda([e1, e2]) => {
+                    // Can't substitute
+                    if v == e1 {
+                        return vec!()
+                    }
+                    let subst_e2s = self.substitute(egraph, e2, subst);
+                    subst_e2s
+                        .iter()
+                        .map(|e2| egraph.add(Lambda::Lambda([e1, *e2])))
+                        .collect()
+                }
+                Lambda::Let([e1, e2, e3]) => {
+                    // Can't substitute
+                    if v == e1 {
+                        return vec!()
+                    }
+                    let subst_e2s = self.substitute(egraph, e2, subst);
+                    let subst_e3s = self.substitute(egraph, e3, subst);
+                    product(&subst_e2s, &subst_e3s)
+                        .map(|(e2, e3)| egraph.add(Lambda::Let([e1, *e2, *e3])))
+                        .collect()
+                }
+                Lambda::Var(id) => {
+                    if v == id {
+                        vec!(e)
+                    } else {
+                        vec!(id)
+                    }
+                }
+                _ => vec!(eclass_id)
+            };
+            new_ids.append(&mut ids);
+        }
+        for (class1, class2) in product(&new_ids, &new_ids) {
+            egraph.union(*class1, *class2);
+        }
+        new_ids
+    }
+}
+
+impl Applier<Lambda, LambdaAnalysis> for CallByName {
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph,
+        eclass: Id,
+        subst: &Subst,
+        _searcher_ast: Option<&PatternAst<Lambda>>,
+        _rule_name: Symbol,
+    ) -> Vec<Id> {
+        let new_ids = self.substitute(egraph, subst[self.body], subst);
+        for id in &new_ids {
+            egraph.union(eclass, *id);
+        }
+        new_ids
+    }
+}
+
+
+// https://stackoverflow.com/questions/69613407/how-do-i-get-the-cartesian-product-of-2-vectors-by-using-iterator/74805365#74805365
+fn product<'a: 'c, 'b: 'c, 'c, T>(
+    xs: &'a [T],
+    ys: &'b [T],
+) -> impl Iterator<Item = (&'a T, &'b T)> + 'c {
+    xs.iter().flat_map(move |x| std::iter::repeat(x).zip(ys))
 }
 
 struct CaptureAvoid {
@@ -269,20 +372,43 @@ egg::test_fn! {
     "(if (= 1 1) 7 9)" => "7"
 }
 
+// Times out
+// (without a double, takes ~20s)
 egg::test_fn! {
-    lambda_compose_many, rules(),
+    lambda_compose_many_many1, rules(),
     "(let compose (lam f (lam g (lam x (app (var f)
                                        (app (var g) (var x))))))
+     (let double (lam f (app (app (var compose) (var f)) (var f)))
      (let add1 (lam y (+ (var y) 1))
-     (app (app (var compose) (var add1))
-          (app (app (var compose) (var add1))
-               (app (app (var compose) (var add1))
-                    (app (app (var compose) (var add1))
-                         (app (app (var compose) (var add1))
-                              (app (app (var compose) (var add1))
-                                   (var add1)))))))))"
+     (app (var double) 
+     (app (var double)
+     (app (var double)
+     (app (var double)
+     (app (var double)
+     (app (var double)
+     (app (var double)
+     (app (var double)
+         (var add1))))))))))))"
     =>
-    "(lam ?x (+ (var ?x) 7))"
+    "(lam ?x (+ (var ?x) 256))"
+}
+
+// Times out
+// (without a double, takes ~20s)
+egg::test_fn! {
+    lambda_compose_many_many2, rules(),
+    "(let compose (lam f (lam g (lam x (app (var f)
+                                       (app (var g) (var x))))))
+     (let double (lam f (app (app (var compose) (var f)) (var f)))
+     (let add1 (lam y (+ (var y) 1))
+     (app
+         (app (var double) 
+         (app (var double)
+         (app (var double)
+              (var double))))
+         (var add1)))))"
+    =>
+    "(lam ?x (+ (var ?x) 32))"
 }
 
 egg::test_fn! {
