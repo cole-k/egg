@@ -218,7 +218,6 @@ impl CallByName {
         target_eclass: Id,
         memo: &mut HashMap<Id, Option<Vec<Id>>>,
     ) -> Vec<Id> {
-        let eclass_id = egraph[target_eclass].id;
         // if !egraph[target_eclass].data.free.contains(&v) {
         //     return vec!()
         // }
@@ -232,6 +231,7 @@ impl CallByName {
                 }
             }
         }
+        // println!("eclass_id: {:?}, starting search", target_eclass);
         memo.insert(target_eclass, None);
         let mut new_ids = vec!();
         for lambda_term in egraph[target_eclass].nodes.clone() {
@@ -254,43 +254,53 @@ impl CallByName {
                     let sym = get_sym(e1, egraph);
                     // Can't substitute
                     if sym == subst_sym {
-                        return vec!()
-                    }
+                        vec!()
+                    } else {
                     let subst_e2s = self.substitute(egraph, subst_sym, subst_e, e2, memo);
                     subst_e2s
                         .iter()
                         .map(|e2| egraph.add(Lambda::Lambda([e1, *e2])))
                         .collect()
+                    }
                 }
                 Lambda::Let([e1, e2, e3]) => {
                     let sym = get_sym(e1, egraph);
                     // Can't substitute
                     if sym == subst_sym {
-                        return vec!()
-                    }
+                        vec!()
+                    } else {
                     let subst_e2s = self.substitute(egraph, subst_sym, subst_e, e2, memo);
                     let subst_e3s = self.substitute(egraph, subst_sym, subst_e, e3, memo);
                     product(&subst_e2s, &subst_e3s)
                         .map(|(e2, e3)| egraph.add(Lambda::Let([e1, *e2, *e3])))
                         .collect()
-                }
-                Lambda::Var(id) => {
-                    self.substitute(egraph, subst_sym, subst_e, id, memo)
-                }
-                Lambda::Symbol(sym) => {
-                    if sym == subst_sym {
-                        return vec!(subst_e)
-                    } else {
-                        return vec!(eclass_id)
                     }
                 }
-                _ => vec!(eclass_id)
+                Lambda::Var(id) => {
+                    match egraph[id].nodes[..] {
+                        [Lambda::Symbol(sym)] => {
+                            if sym == subst_sym {
+                                vec!(subst_e)
+                            } else {
+                                vec!(target_eclass)
+                            }
+                        },
+                        _ => {
+                            self.substitute(egraph, subst_sym, subst_e, id, memo)
+                                .iter()
+                                .map(|e| egraph.add(Lambda::Var(*e)))
+                                .collect()
+                        }
+                    }
+                }
+                _ => vec!(target_eclass)
             };
             new_ids.append(&mut ids);
         }
         for (class1, class2) in product(&new_ids, &new_ids) {
             egraph.union(*class1, *class2);
         }
+        // println!("eclass_id: {:?}, new_ids: {:?}", target_eclass, new_ids.clone());
         memo.insert(target_eclass, Some(new_ids.clone()));
         new_ids
     }
@@ -310,6 +320,7 @@ impl Applier<Lambda, LambdaAnalysis> for CallByName {
         for id in &new_ids {
             egraph.union(eclass, *id);
         }
+        // println!("eclass: {:?}, subst_sym: {:?}, subst_e: {:?}, subst_body: {:?}, new_ids: {:?}\negraph: {:?}", eclass, subst_sym, subst[self.e], subst[self.body], new_ids.clone(), egraph);
         new_ids
     }
 }
@@ -478,11 +489,23 @@ egg::test_fn! {
 }
 
 egg::test_fn! {
-    lambda_test_call_by_name, rules(),
+    lambda_call_by_name_1, rules(),
     "(let double (lam f (lam x (app (var f) (app (var f) (var x)))))
      (let add1 (lam y (+ (var y) 1))
      (app (var double)
          (var add1))))"
+    =>
+    "(lam ?x (+ (var ?x) 2))"
+}
+
+egg::test_fn! {
+    lambda_call_by_name_2, rules(),
+    "(let compose (lam f (lam g (lam x (app (var f)
+                                       (app (var g) (var x))))))
+     (let double (lam f (app (app (var compose) (var f)) (var f)))
+     (let add1 (lam y (+ (var y) 1))
+     (app (var double)
+         (var add1)))))"
     =>
     "(lam ?x (+ (var ?x) 2))"
 }
