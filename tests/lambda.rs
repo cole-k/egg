@@ -1,5 +1,6 @@
 use egg::{rewrite as rw, *};
 use fxhash::FxHashSet as HashSet;
+use fxhash::FxHashMap as HashMap;
 
 define_language! {
     enum Lambda {
@@ -170,6 +171,38 @@ fn rules() -> Vec<Rewrite<Lambda, LambdaAnalysis>> {
     ]
 }
 
+fn substitute(egraph: &mut EGraph, expr: RecExpr<Lambda>, sym: Symbol, subst_expr: RecExpr<Lambda>) -> (Id, Vec<Id>) {
+    panic!("expr: {:?}, sym: {}, subst_expr: {:?}", expr.as_ref(), sym, subst_expr.as_ref())
+}
+
+struct SketchGuidedBetaReduction {
+    v: Var,
+    e: Var,
+    body: Var
+}
+
+impl Applier<Lambda, LambdaAnalysis> for SketchGuidedBetaReduction {
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph,
+        eclass: Id,
+        subst: &Subst,
+        _searcher_ast: Option<&PatternAst<Lambda>>,
+        _rule_name: Symbol,
+    ) -> Vec<Id> {
+        let v = subst[self.v];
+        let sym_to_replace = get_sym(v, egraph);
+        let e = subst[self.e];
+        let body = subst[self.body];
+        let extractor = Extractor::new(&egraph, AstSize);
+        let (_, best_e) = extractor.find_best(e);
+        let (_, best_body) = extractor.find_best(body);
+        let (new_id, changed_ids) = substitute(egraph, best_body, sym_to_replace, best_e);
+        egraph.union(eclass, new_id);
+        vec!(new_id) // + changed_ids
+    }
+}
+
 struct CallByName {
     v: Var,
     e: Var,
@@ -180,53 +213,75 @@ impl CallByName {
     fn substitute(
         &self,
         egraph: &mut EGraph,
+        subst_sym: Symbol,
+        subst_e: Id,
         target_eclass: Id,
-        subst: &Subst,
+        memo: &mut HashMap<Id, Option<Vec<Id>>>,
     ) -> Vec<Id> {
-        let v = subst[self.v];
-        let e = subst[self.e];
         let eclass_id = egraph[target_eclass].id;
-        // No substitution to make
-        if !egraph[target_eclass].data.free.contains(&v) {
-            return vec!()
+        // if !egraph[target_eclass].data.free.contains(&v) {
+        //     return vec!()
+        // }
+        if let Some(result) = memo.get(&target_eclass) {
+            match result {
+                Some(cached_value) => return cached_value.to_vec(),
+                None => {
+                    // infinite loop
+                    // panic!("infinite loop at id: {:?}, egraph: {:?}", subst_e, egraph);
+                    return vec!()
+                }
+            }
         }
+        memo.insert(target_eclass, None);
         let mut new_ids = vec!();
         for lambda_term in egraph[target_eclass].nodes.clone() {
             let mut ids = match lambda_term {
                 Lambda::App([e1, e2]) => {
-                    let subst_e1s = self.substitute(egraph, e1, subst);
-                    let subst_e2s = self.substitute(egraph, e2, subst);
+                    let subst_e1s = self.substitute(egraph, subst_sym, subst_e, e1, memo);
+                    let subst_e2s = self.substitute(egraph, subst_sym, subst_e, e2, memo);
                     product(&subst_e1s, &subst_e2s)
                         .map(|(e1, e2)| egraph.add(Lambda::App([*e1, *e2])))
                         .collect()
                 }
+                Lambda::Add([e1, e2]) => {
+                    let subst_e1s = self.substitute(egraph, subst_sym, subst_e, e1, memo);
+                    let subst_e2s = self.substitute(egraph, subst_sym, subst_e, e2, memo);
+                    product(&subst_e1s, &subst_e2s)
+                        .map(|(e1, e2)| egraph.add(Lambda::Add([*e1, *e2])))
+                        .collect()
+                }
                 Lambda::Lambda([e1, e2]) => {
+                    let sym = get_sym(e1, egraph);
                     // Can't substitute
-                    if v == e1 {
+                    if sym == subst_sym {
                         return vec!()
                     }
-                    let subst_e2s = self.substitute(egraph, e2, subst);
+                    let subst_e2s = self.substitute(egraph, subst_sym, subst_e, e2, memo);
                     subst_e2s
                         .iter()
                         .map(|e2| egraph.add(Lambda::Lambda([e1, *e2])))
                         .collect()
                 }
                 Lambda::Let([e1, e2, e3]) => {
+                    let sym = get_sym(e1, egraph);
                     // Can't substitute
-                    if v == e1 {
+                    if sym == subst_sym {
                         return vec!()
                     }
-                    let subst_e2s = self.substitute(egraph, e2, subst);
-                    let subst_e3s = self.substitute(egraph, e3, subst);
+                    let subst_e2s = self.substitute(egraph, subst_sym, subst_e, e2, memo);
+                    let subst_e3s = self.substitute(egraph, subst_sym, subst_e, e3, memo);
                     product(&subst_e2s, &subst_e3s)
                         .map(|(e2, e3)| egraph.add(Lambda::Let([e1, *e2, *e3])))
                         .collect()
                 }
                 Lambda::Var(id) => {
-                    if v == id {
-                        vec!(e)
+                    self.substitute(egraph, subst_sym, subst_e, id, memo)
+                }
+                Lambda::Symbol(sym) => {
+                    if sym == subst_sym {
+                        return vec!(subst_e)
                     } else {
-                        vec!(id)
+                        return vec!(eclass_id)
                     }
                 }
                 _ => vec!(eclass_id)
@@ -236,6 +291,7 @@ impl CallByName {
         for (class1, class2) in product(&new_ids, &new_ids) {
             egraph.union(*class1, *class2);
         }
+        memo.insert(target_eclass, Some(new_ids.clone()));
         new_ids
     }
 }
@@ -249,11 +305,21 @@ impl Applier<Lambda, LambdaAnalysis> for CallByName {
         _searcher_ast: Option<&PatternAst<Lambda>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
-        let new_ids = self.substitute(egraph, subst[self.body], subst);
+        let subst_sym = get_sym(subst[self.v], egraph);
+        let new_ids = self.substitute(egraph, subst_sym, subst[self.e], subst[self.body], &mut HashMap::default());
         for id in &new_ids {
             egraph.union(eclass, *id);
         }
         new_ids
+    }
+}
+
+fn get_sym(eclass: Id, egraph: &EGraph) -> Symbol {
+    let nodes = &egraph[eclass].nodes;
+    // This var should just point to a symbol
+    match nodes[..] {
+        [Lambda::Symbol(sym)] => sym,
+        _ => panic!("Nodes at id: {:?} are not just a single symbol, nodes: {:?}", eclass, nodes)
     }
 }
 
@@ -409,6 +475,16 @@ egg::test_fn! {
          (var add1)))))"
     =>
     "(lam ?x (+ (var ?x) 32))"
+}
+
+egg::test_fn! {
+    lambda_test_call_by_name, rules(),
+    "(let double (lam f (lam x (app (var f) (app (var f) (var x)))))
+     (let add1 (lam y (+ (var y) 1))
+     (app (var double)
+         (var add1))))"
+    =>
+    "(lam ?x (+ (var ?x) 2))"
 }
 
 egg::test_fn! {
