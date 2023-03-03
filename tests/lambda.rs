@@ -531,6 +531,33 @@ egg::test_fn! {
 }
 
 egg::test_fn! {
+    lambda_call_by_name_3, rules(),
+    "(let compose (lam f (lam g (lam x (app (var f)
+                                       (app (var g) (var x))))))
+     (let double (lam f (app (app (var compose) (var f)) (var f)))
+     (let add1 (lam y (+ (var y) 1))
+     (app
+         (app (var double)
+              (var double))
+         (var add1)))))"
+    =>
+    "(lam ?x (+ (var ?x) 4))"
+}
+
+egg::test_fn! {
+    lambda_call_by_name_4, rules(),
+    "(let compose (lam f (lam g (lam x (app (var f)
+                                       (app (var g) (var x))))))
+     (let add1 (lam y (+ (var y) 1))
+     (let addadd1 (lam f (app (app (var compose) (var add1)) (var f)))
+     (app (var addadd1)
+     (app (var addadd1)
+         (var add1))))))"
+    =>
+    "(lam ?x (+ (var ?x) 3))"
+}
+
+egg::test_fn! {
     #[cfg(not(debug_assertions))]
     #[cfg_attr(feature = "test-explanations", ignore)]
     lambda_function_repeat, rules(),
