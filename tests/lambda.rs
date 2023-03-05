@@ -250,16 +250,18 @@ fn substitute(
                     .collect()
             }
             Lambda::Lambda([e1, e2]) => {
+                // let var = get_var(e1, egraph);
                 let sym = get_sym(e1, egraph);
                 // Can't substitute
                 if sym == subst_sym {
                     vec!()
-                } else if false && egraph[subst_e].data.free.contains(&e1) {
+                } else if egraph[subst_e].data.free.contains(&e1) {
                     // This way of getting a fresh sym is stolen from
                     // CaptureAvoid, hopefully it is OK.
                     let fresh_sym = Lambda::Symbol(format!("_{}", target_eclass).into());
                     let fresh_sym_id = egraph.add(fresh_sym);
                     let fresh_sym_var_id = egraph.add(Lambda::Var(fresh_sym_id));
+                    println!("fresh sym_var_id: {:?}, fresh sym_id: {:?}", fresh_sym_var_id, fresh_sym_id);
                     let fresh_e2s = substitute(egraph, sym, fresh_sym_var_id, e2, &mut HashMap::default());
                     // Can't be done without a termporary variable because
                     // egraph would be borrowed twice. Probably better to not
@@ -270,7 +272,7 @@ fn substitute(
                         .collect();
                     subst_e2s
                         .iter()
-                        .map(|subst_e2| egraph.add(Lambda::Lambda([fresh_sym_var_id, *subst_e2])))
+                        .map(|subst_e2| egraph.add(Lambda::Lambda([fresh_sym_id, *subst_e2])))
                         .collect()
                     // Should this be done?
                     // let fresh_lam = egraph.add(Lambda::Lambda([fresh_sym_var_id, fresh_e2]));
@@ -285,10 +287,39 @@ fn substitute(
                 }
             }
             Lambda::Let([e1, e2, e3]) => {
+                // let var = get_var(e1, egraph);
                 let sym = get_sym(e1, egraph);
                 // Can't substitute
                 if sym == subst_sym {
                     vec!()
+                } else if egraph[subst_e].data.free.contains(&e1) {
+                    // This way of getting a fresh sym is stolen from
+                    // CaptureAvoid, hopefully it is OK.
+                    let fresh_sym = Lambda::Symbol(format!("_{}", target_eclass).into());
+                    let fresh_sym_id = egraph.add(fresh_sym);
+                    let fresh_sym_var_id = egraph.add(Lambda::Var(fresh_sym_id));
+                    println!("fresh sym_var_id: {:?}, fresh sym_id: {:?}", fresh_sym_var_id, fresh_sym_id);
+                    let fresh_e2s = substitute(egraph, sym, fresh_sym_var_id, e2, &mut HashMap::default());
+                    // Can't be done without a termporary variable because
+                    // egraph would be borrowed twice. Probably better to not
+                    // collect and use an iterator.
+                    let subst_e2s: Vec<Id> = fresh_e2s
+                        .iter()
+                        .flat_map(|fresh_e2| substitute(egraph, subst_sym, subst_e, *fresh_e2, memo))
+                        .collect();
+                    let fresh_e3s = substitute(egraph, sym, fresh_sym_var_id, e3, &mut HashMap::default());
+                    let subst_e3s: Vec<Id> = fresh_e3s
+                        .iter()
+                        .flat_map(|fresh_e3| substitute(egraph, subst_sym, subst_e, *fresh_e3, memo))
+                        .collect();
+                    product(&subst_e2s, &subst_e3s)
+                        .map(|(subst_e2, subst_e3)| egraph.add(Lambda::Let([fresh_sym_id, *subst_e2, *subst_e3])))
+                        .collect()
+                    // Should this be done?
+                    // let fresh_lam = egraph.add(Lambda::Lambda([fresh_sym_var_id, fresh_e2]));
+                    // Alpha equivalent
+                    // egraph.union(target_eclass, fresh_lam);
+
                 } else {
                 let subst_e2s = substitute(egraph, subst_sym, subst_e, e2, memo);
                 let subst_e3s = substitute(egraph, subst_sym, subst_e, e3, memo);
@@ -335,12 +366,13 @@ impl Applier<Lambda, LambdaAnalysis> for CallByName {
         _searcher_ast: Option<&PatternAst<Lambda>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
+        println!("eclass: {:?}, subst_v: {:?}, subst_e: {:?}, subst_body: {:?}", eclass, subst[self.v], subst[self.e], subst[self.body]);
         let subst_sym = get_sym(subst[self.v], egraph);
         let new_ids = substitute(egraph, subst_sym, subst[self.e], subst[self.body], &mut HashMap::default());
         for id in &new_ids {
             egraph.union(eclass, *id);
         }
-        // println!("eclass: {:?}, subst_sym: {:?}, subst_e: {:?}, subst_body: {:?}, new_ids: {:?}\negraph: {:?}", eclass, subst_sym, subst[self.e], subst[self.body], new_ids.clone(), egraph);
+        println!("eclass: {:?}, subst_sym: {:?}, subst_e: {:?}, subst_body: {:?}, new_ids: {:?}", eclass, subst_sym, subst[self.e], subst[self.body], new_ids.clone());
         new_ids
     }
 }
@@ -350,10 +382,9 @@ fn get_sym(eclass: Id, egraph: &EGraph) -> Symbol {
     // This var should just point to a symbol
     match nodes[..] {
         [Lambda::Symbol(sym)] => sym,
-        _ => panic!("Nodes at id: {:?} are not just a single symbol, nodes: {:?}", eclass, nodes)
+        _ => panic!("Nodes at id: {:?} are not just a single symbol, nodes: {:?},\negraph: {:?}", eclass, nodes, egraph)
     }
 }
-
 
 // https://stackoverflow.com/questions/69613407/how-do-i-get-the-cartesian-product-of-2-vectors-by-using-iterator/74805365#74805365
 fn product<'a: 'c, 'b: 'c, 'c, T>(
