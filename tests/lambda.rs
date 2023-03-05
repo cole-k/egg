@@ -214,47 +214,51 @@ fn substitute(
     subst_sym: Symbol,
     subst_e: Id,
     target_eclass: Id,
-    memo: &mut HashMap<Id, Option<Vec<Id>>>,
-) -> Vec<Id> {
+    memo: &mut HashMap<Id, Option<HashSet<Id>>>,
+) -> HashSet<Id> {
     // if !egraph[target_eclass].data.free.contains(&v) {
 
     //     return vec!()
     // }
     if let Some(result) = memo.get(&target_eclass) {
         match result {
-            Some(cached_value) => return cached_value.to_vec(),
+            Some(cached_value) => return cached_value.clone(),
             None => {
                 // infinite loop
                 // panic!("infinite loop at id: {:?}, egraph: {:?}", subst_e, egraph);
-                return vec!()
+                return HashSet::default()
             }
         }
     }
     // println!("eclass_id: {:?}, starting search", target_eclass);
     memo.insert(target_eclass, None);
-    let mut new_ids = vec!();
+    let mut new_ids = HashSet::default();
     for lambda_term in egraph[target_eclass].nodes.clone() {
-        let mut ids = match lambda_term {
+        match lambda_term {
             Lambda::App([e1, e2]) => {
                 let subst_e1s = substitute(egraph, subst_sym, subst_e, e1, memo);
                 let subst_e2s = substitute(egraph, subst_sym, subst_e, e2, memo);
-                product(&subst_e1s, &subst_e2s)
-                    .map(|(e1, e2)| egraph.add(Lambda::App([*e1, *e2])))
-                    .collect()
+                for e1 in &subst_e1s {
+                    for e2 in &subst_e2s {
+                        new_ids.insert(egraph.add(Lambda::App([*e1, *e2])));
+                    }
+                }
             }
             Lambda::Add([e1, e2]) => {
                 let subst_e1s = substitute(egraph, subst_sym, subst_e, e1, memo);
                 let subst_e2s = substitute(egraph, subst_sym, subst_e, e2, memo);
-                product(&subst_e1s, &subst_e2s)
-                    .map(|(e1, e2)| egraph.add(Lambda::Add([*e1, *e2])))
-                    .collect()
+                for e1 in &subst_e1s {
+                    for e2 in &subst_e2s {
+                        new_ids.insert(egraph.add(Lambda::Add([*e1, *e2])));
+                    }
+                }
             }
             Lambda::Lambda([e1, e2]) => {
                 // let var = get_var(e1, egraph);
                 let sym = get_sym(e1, egraph);
                 // Can't substitute
                 if sym == subst_sym {
-                    vec!()
+                    ()
                 } else if egraph[subst_e].data.free.contains(&e1) {
                     // This way of getting a fresh sym is stolen from
                     // CaptureAvoid, hopefully it is OK.
@@ -266,24 +270,22 @@ fn substitute(
                     // Can't be done without a termporary variable because
                     // egraph would be borrowed twice. Probably better to not
                     // collect and use an iterator.
-                    let subst_e2s: Vec<Id> = fresh_e2s
+                    let subst_e2s: HashSet<Id> = fresh_e2s
                         .iter()
                         .flat_map(|fresh_e2| substitute(egraph, subst_sym, subst_e, *fresh_e2, memo))
                         .collect();
-                    subst_e2s
-                        .iter()
-                        .map(|subst_e2| egraph.add(Lambda::Lambda([fresh_sym_id, *subst_e2])))
-                        .collect()
+                    for subst_e2 in &subst_e2s {
+                        new_ids.insert(egraph.add(Lambda::Lambda([fresh_sym_id, *subst_e2])));
+                    }
                     // Should this be done?
                     // let fresh_lam = egraph.add(Lambda::Lambda([fresh_sym_var_id, fresh_e2]));
                     // Alpha equivalent
                     // egraph.union(target_eclass, fresh_lam);
 
                 } else {
-                    substitute(egraph, subst_sym, subst_e, e2, memo)
-                        .iter()
-                        .map(|subst_e2| egraph.add(Lambda::Lambda([e1, *subst_e2])))
-                        .collect()
+                    for subst_e2 in &substitute(egraph, subst_sym, subst_e, e2, memo) {
+                        new_ids.insert(egraph.add(Lambda::Lambda([e1, *subst_e2])));
+                    }
                 }
             }
             Lambda::Let([e1, e2, e3]) => {
@@ -291,7 +293,7 @@ fn substitute(
                 let sym = get_sym(e1, egraph);
                 // Can't substitute
                 if sym == subst_sym {
-                    vec!()
+                    ()
                 } else if egraph[subst_e].data.free.contains(&e1) {
                     // This way of getting a fresh sym is stolen from
                     // CaptureAvoid, hopefully it is OK.
@@ -303,54 +305,60 @@ fn substitute(
                     // Can't be done without a termporary variable because
                     // egraph would be borrowed twice. Probably better to not
                     // collect and use an iterator.
-                    let subst_e2s: Vec<Id> = fresh_e2s
+                    let subst_e2s: HashSet<Id> = fresh_e2s
                         .iter()
                         .flat_map(|fresh_e2| substitute(egraph, subst_sym, subst_e, *fresh_e2, memo))
                         .collect();
                     let fresh_e3s = substitute(egraph, sym, fresh_sym_var_id, e3, &mut HashMap::default());
-                    let subst_e3s: Vec<Id> = fresh_e3s
+                    let subst_e3s: HashSet<Id> = fresh_e3s
                         .iter()
                         .flat_map(|fresh_e3| substitute(egraph, subst_sym, subst_e, *fresh_e3, memo))
                         .collect();
-                    product(&subst_e2s, &subst_e3s)
-                        .map(|(subst_e2, subst_e3)| egraph.add(Lambda::Let([fresh_sym_id, *subst_e2, *subst_e3])))
-                        .collect()
+                    for subst_e2 in &subst_e2s {
+                        for subst_e3 in &subst_e3s {
+                            new_ids.insert(egraph.add(Lambda::Let([fresh_sym_id, *subst_e2, *subst_e3])));
+                        }
+                    }
                     // Should this be done?
                     // let fresh_lam = egraph.add(Lambda::Lambda([fresh_sym_var_id, fresh_e2]));
                     // Alpha equivalent
                     // egraph.union(target_eclass, fresh_lam);
 
                 } else {
-                let subst_e2s = substitute(egraph, subst_sym, subst_e, e2, memo);
-                let subst_e3s = substitute(egraph, subst_sym, subst_e, e3, memo);
-                product(&subst_e2s, &subst_e3s)
-                    .map(|(e2, e3)| egraph.add(Lambda::Let([e1, *e2, *e3])))
-                    .collect()
+                    let subst_e2s = substitute(egraph, subst_sym, subst_e, e2, memo);
+                    let subst_e3s = substitute(egraph, subst_sym, subst_e, e3, memo);
+                    for subst_e2 in &subst_e2s {
+                        for subst_e3 in &subst_e3s {
+                            new_ids.insert(egraph.add(Lambda::Let([e1, *subst_e2, *subst_e3])));
+                        }
+                    }
                 }
             }
             Lambda::Var(id) => {
                 match egraph[id].nodes[..] {
                     [Lambda::Symbol(sym)] => {
                         if sym == subst_sym {
-                            vec!(subst_e)
+                            new_ids.insert(subst_e);
                         } else {
-                            vec!(target_eclass)
+                            new_ids.insert(target_eclass);
                         }
                     },
                     _ => {
-                        substitute(egraph, subst_sym, subst_e, id, memo)
-                            .iter()
-                            .map(|e| egraph.add(Lambda::Var(*e)))
-                            .collect()
+                        for e in &substitute(egraph, subst_sym, subst_e, id, memo) {
+                            new_ids.insert(egraph.add(Lambda::Var(*e)));
+                        }
                     }
                 }
             }
-            _ => vec!(target_eclass)
-        };
-        new_ids.append(&mut ids);
+            _ => {
+                new_ids.insert(target_eclass);
+            }
+        }
     }
-    for (class1, class2) in product(&new_ids, &new_ids) {
-        egraph.union(*class1, *class2);
+    for id1 in &new_ids {
+        for id2 in &new_ids {
+            egraph.union(*id1, *id2);
+        }
     }
     // println!("eclass_id: {:?}, new_ids: {:?}", target_eclass, new_ids.clone());
     memo.insert(target_eclass, Some(new_ids.clone()));
@@ -373,7 +381,7 @@ impl Applier<Lambda, LambdaAnalysis> for CallByName {
             egraph.union(eclass, *id);
         }
         println!("eclass: {:?}, subst_sym: {:?}, subst_e: {:?}, subst_body: {:?}, new_ids: {:?}", eclass, subst_sym, subst[self.e], subst[self.body], new_ids.clone());
-        new_ids
+        new_ids.into_iter().collect()
     }
 }
 
@@ -387,12 +395,12 @@ fn get_sym(eclass: Id, egraph: &EGraph) -> Symbol {
 }
 
 // https://stackoverflow.com/questions/69613407/how-do-i-get-the-cartesian-product-of-2-vectors-by-using-iterator/74805365#74805365
-fn product<'a: 'c, 'b: 'c, 'c, T>(
-    xs: &'a [T],
-    ys: &'b [T],
-) -> impl Iterator<Item = (&'a T, &'b T)> + 'c {
-    xs.iter().flat_map(move |x| std::iter::repeat(x).zip(ys))
-}
+// fn product<'a: 'c, 'b: 'c, 'c, T>(
+//     xs: &'a [T],
+//     ys: &'b [T],
+// ) -> impl Iterator<Item = (&'a T, &'b T)> + 'c {
+//     xs.iter().flat_map(move |x| std::iter::repeat(x).zip(ys))
+// }
 
 struct CaptureAvoid {
     fresh: Var,
