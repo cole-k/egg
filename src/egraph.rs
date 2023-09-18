@@ -133,6 +133,12 @@ impl<L: Language, N: Analysis<L>> EGraph<L, N> {
         self.classes.values_mut()
     }
 
+    /// Hack to get a mutable reference to the eclass
+    pub fn set_eclass(&mut self, id: Id, eclass: EClass<L, N::Data>) {
+        let id = self.find(id);
+        self.classes.insert(id, eclass);
+    }
+
     /// Returns `true` if the egraph is empty
     /// # Example
     /// ```

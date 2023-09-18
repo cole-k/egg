@@ -30,6 +30,26 @@ impl Lambda {
             _ => None,
         }
     }
+
+    fn increment_id(&self, increment: usize) -> Self {
+        match self {
+            Lambda::Var(id) => Lambda::Var(increment_id(*id, increment)),
+            Lambda::Add([id1, id2]) => Lambda::Add([increment_id(*id1, increment), increment_id(*id2, increment)]),
+            Lambda::App([id1, id2]) => Lambda::App([increment_id(*id1, increment), increment_id(*id2, increment)]),
+            Lambda::Lambda([id1, id2]) => Lambda::Lambda([increment_id(*id1, increment), increment_id(*id2, increment)]),
+            Lambda::Let([id1, id2, id3]) =>
+                Lambda::Let([increment_id(*id1, increment), increment_id(*id2, increment), increment_id(*id3, increment)]),
+            Lambda::Fix([id1, id2]) => Lambda::Fix([increment_id(*id1, increment), increment_id(*id2, increment)]),
+            Lambda::If([id1, id2, id3]) =>
+                Lambda::If([increment_id(*id1, increment), increment_id(*id2, increment), increment_id(*id3, increment)]),
+            _ => self.to_owned()
+        }
+    }
+}
+
+fn increment_id(id: Id, increment: usize) -> Id {
+    let id_as_usize: usize = id.into();
+    (id_as_usize + increment).into()
 }
 
 type EGraph = egg::EGraph<Lambda, LambdaAnalysis>;
@@ -141,7 +161,7 @@ fn rules() -> Vec<Rewrite<Lambda, LambdaAnalysis>> {
         rw!("fix";      "(fix ?v ?e)"             => "(let ?v (fix ?v ?e) ?e)"),
         // rw!("beta";     "(app (lam ?v ?body) ?e)" => "(let ?v ?e ?body)"),
         rw!("beta";     "(app (lam ?v ?body) ?e)" => {
-            { CallByName {
+            { SketchGuidedBetaReduction {
                 v: var("?v"),
                 e: var("?e"),
                 body: var("?body"),
@@ -171,9 +191,80 @@ fn rules() -> Vec<Rewrite<Lambda, LambdaAnalysis>> {
     ]
 }
 
-// fn substitute(egraph: &mut EGraph, expr: RecExpr<Lambda>, sym: Symbol, subst_expr: RecExpr<Lambda>) -> (Id, Vec<Id>) {
-//     panic!("expr: {:?}, sym: {}, subst_expr: {:?}", expr.as_ref(), sym, subst_expr.as_ref())
-// }
+fn expr_contains_sym(rec_expr: &RecExpr<Lambda>, start_index: usize, end_index: usize, sym: Symbol) -> bool {
+    rec_expr
+        .as_ref()[start_index..end_index+1]
+        .iter()
+        .any(|lambda| match lambda {
+            Lambda::Symbol(s) => *s == sym,
+            _ => false,
+        })
+}
+
+fn substitute_rec_expr(rec_expr: &mut RecExpr<Lambda>, seen: &mut HashSet<Id>, id: Id, subst_sym: Symbol, subst_id: Id, fresh_prefix_id: Id) {
+    if seen.contains(&id) {
+        panic!();
+        return
+    }
+    seen.insert(id);
+    match rec_expr[id] {
+        Lambda::Add([id1, id2]) | Lambda::Eq([id1, id2]) | Lambda::App([id1, id2]) | Lambda::Fix([id1, id2]) => {
+            substitute_rec_expr(rec_expr, seen, id1, subst_sym, subst_id, fresh_prefix_id);
+            substitute_rec_expr(rec_expr, seen, id2, subst_sym, subst_id, fresh_prefix_id);
+        }
+        Lambda::If([id1, id2, id3]) => {
+            substitute_rec_expr(rec_expr, seen, id1, subst_sym, subst_id, fresh_prefix_id);
+            substitute_rec_expr(rec_expr, seen, id2, subst_sym, subst_id, fresh_prefix_id);
+            substitute_rec_expr(rec_expr, seen, id3, subst_sym, subst_id, fresh_prefix_id);
+        }
+        Lambda::Lambda([id1, id2]) => {
+            match rec_expr[id1] {
+                Lambda::Symbol(sym) => {
+                    if expr_contains_sym(rec_expr, 0, subst_id.into(), sym) {
+                        let fresh_sym = Symbol::from(format!("{0}_{1}", fresh_prefix_id, id1));
+                        // Since all vars/lambdas/lets that use this name will
+                        // point to this id, to alpha rename we only need to
+                        // change the symbol beneath it. We should not need to
+                        // recursively substitute...
+                        rec_expr[id1] = Lambda::Symbol(fresh_sym);
+                    }
+                    substitute_rec_expr(rec_expr, seen, id2, subst_sym, subst_id, fresh_prefix_id);
+                }
+                _ => panic!("substitute_rec_expr: Lambda variable points to {:?}, which isn't a symbol.", rec_expr[id1])
+            }
+        }
+        Lambda::Let([id1, id2, id3]) => {
+            match rec_expr[id1] {
+                Lambda::Symbol(sym) => {
+                    if expr_contains_sym(rec_expr, 0, subst_id.into(), sym) {
+                        let fresh_sym = Symbol::from(format!("{0}_{1}", fresh_prefix_id, id1));
+                        // Since all vars/lambdas/lets that use this name will
+                        // point to this id, to alpha rename we only need to
+                        // change the symbol beneath it. We should not need to
+                        // recursively substitute...
+                        rec_expr[id1] = Lambda::Symbol(fresh_sym);
+                    }
+                    substitute_rec_expr(rec_expr, seen, id2, subst_sym, subst_id, fresh_prefix_id);
+                    substitute_rec_expr(rec_expr, seen, id3, subst_sym, subst_id, fresh_prefix_id);
+                }
+                _ => panic!("substitute_rec_expr: Let variable points to {:?}, which isn't a symbol.", rec_expr[id1])
+            }
+        }
+        Lambda::Var(var_id) => {
+            match rec_expr[var_id] {
+                Lambda::Symbol(sym) => {
+                    if sym == subst_sym {
+                        rec_expr[id] = rec_expr[subst_id].to_owned();
+                    }
+                }
+                _ => panic!("substitute_rec_expr: Var({:?}) points to {:?}, which isn't a symbol.", var_id, rec_expr[var_id])
+            }
+        }
+        _ => {
+            // Nothing to do for all other non-recursive cases
+        }
+    }
+}
 
 struct SketchGuidedBetaReduction {
     v: Var,
@@ -197,10 +288,29 @@ impl Applier<Lambda, LambdaAnalysis> for SketchGuidedBetaReduction {
         let extractor = Extractor::new(&egraph, AstSize);
         let (_, best_e) = extractor.find_best(e);
         let (_, best_body) = extractor.find_best(body);
-        panic!()
-        // let (new_id, changed_ids) = substitute(egraph, best_body, sym_to_replace, best_e);
-        // egraph.union(eclass, new_id);
-        // vec!(new_id) // + changed_ids
+        let e_rec_expr_len = best_e.as_ref().len();
+        let e_id = e_rec_expr_len - 1;
+        // Adjust the ids so we can put them at the end of the best_e rec expr.
+        let adjusted_body_rec_expr: Vec<Lambda> = best_body
+            .as_ref()
+            .into_iter()
+            .map(|expr| expr.increment_id(e_rec_expr_len))
+            .collect();
+        // Put both body and e into a single rec expr.
+        let body_and_e_rec_expr: RecExpr<Lambda> = best_e
+            .as_ref()
+            .into_iter()
+            .cloned()
+            .chain(adjusted_body_rec_expr)
+            .collect::<Vec<Lambda>>()
+            .into();
+        let body_id = body_and_e_rec_expr.as_ref().len() - 1;
+        let mut new_rec_expr = body_and_e_rec_expr.clone();
+        // println!("body: {:?}, e: {:?}, body_and_e: {:?}", best_body.as_ref(), best_e.as_ref(), body_and_e_rec_expr.as_ref());
+        substitute_rec_expr(&mut new_rec_expr, &mut HashSet::default(), body_id.into(), sym_to_replace, e_id.into(), eclass);
+        let new_id = egraph.add_expr(&new_rec_expr);
+        egraph.union(eclass, new_id);
+        vec!(new_id) // + changed_ids
     }
 }
 
@@ -508,10 +618,10 @@ egg::test_fn! {
     "(if (= 1 1) 7 9)" => "7"
 }
 
-// Times out
-// (without a double, takes ~20s)
+// Times out with 8 doubles
+// (with 7 doubles, takes ~20s)
 egg::test_fn! {
-    lambda_compose_many_many1, rules(),
+    lambda_compose_many_many_1, rules(),
     "(let compose (lam f (lam g (lam x (app (var f)
                                        (app (var g) (var x))))))
      (let double (lam f (app (app (var compose) (var f)) (var f)))
@@ -529,10 +639,10 @@ egg::test_fn! {
     "(lam ?x (+ (var ?x) 256))"
 }
 
-// Times out
-// (without a double, takes ~20s)
+// Times out with 5 doubles
+// (with 4 doubles, takes ~20s)
 egg::test_fn! {
-    lambda_compose_many_many2, rules(),
+    lambda_compose_many_many_2, rules(),
     "(let compose (lam f (lam g (lam x (app (var f)
                                        (app (var g) (var x))))))
      (let double (lam f (app (app (var compose) (var f)) (var f)))
@@ -541,7 +651,8 @@ egg::test_fn! {
          (app (var double) 
          (app (var double)
          (app (var double)
-              (var double))))
+         (app (var double)
+              (var double)))))
          (var add1)))))"
     =>
     "(lam ?x (+ (var ?x) 32))"
